@@ -2338,6 +2338,527 @@ function main() {
 }
 ```
 
+<!--label:target-cpp-ErrorCodes-CPP0012-->
+##### CPP0012 - Heap Allocation of Value Type
+
+###### Description
+
+Extern classes or enums annotated with `cpp.ValueType` cannot be directly allocated to the heap. Some Haxe code can be ambiguous about this, to avoid any confusion the ambiguous code is forbidden.
+
+###### Examples
+
+The following examples generate CPP0012.
+
+```haxe
+@:semantics(value)
+@:cpp.ValueType
+extern class Foo {
+    function new():Void;
+}
+
+function main() {
+    final f : cpp.Star<Foo> = cast new Foo(); // CPP0012
+    final f : cpp.Pointer<Foo> = cast new Foo(); // CPP0012
+    final f : cpp.RawPointer<Foo> = cast new Foo(); // CPP0012
+}
+```
+
+<!--label:target-cpp-ExternTypes-->
+#### Extern Types
+
+Extern types come in three varieties: value types, pointer types, and managed types. An extern class or enum becomes one of these by decorating it with the appropriate metadata (`cpp.ValueType`, `cpp.PointerType`, or `cpp.ManagedType`). The following pages go into detail on each of the three types.
+
+By default, the name of the extern type is used as the native types name, e.g. for `extern class Foo {}` the native type being externed must be named `Foo`. However, in C/C++ type names are allowed to start with lower case letters whereas this is not allowed in Haxe. To work around this, you can specify the type name with a string in the extern type metadata. This `type` field must be a string.
+
+```c
+struct foo {};
+```
+
+```haxe
+@:semantics(value)
+@:cpp.ValueType({ type : "foo" })
+extern class Foo {}
+```
+
+C++ types can optionally be scoped in namespaces. The extern type metadata allows you to specify the namespace the externed type is within. This `namespace` field must be an array of strings.
+
+```c++
+namespace foo::bar {
+	struct baz {};
+}
+```
+
+```haxe
+@:semantics(value)
+@:cpp.ValueType({ type : "baz", namespace : [ "foo", "bar" ] })
+extern class Baz {}
+```
+
+There is a third optional field, `flags`, which allows you to configure various options of the extern type. The exact flags available to each extern type and what they do is documented in dedicated page for the extern type.
+
+<!--subtoc-->
+
+<!--label:target-cpp-ExternTypes-ValueTypes-->
+##### Value Types
+
+#### Classes
+
+Native types which are passed by value can be used in Haxe via extern classes annotated with the `@:cpp.ValueType` metadata.
+
+```c
+struct Foo {
+	int bar;
+};
+```
+
+```haxe
+@:semantics(value)
+@:cpp.ValueType
+extern class Foo {
+	var bar : Int;
+
+	function new():Void;
+}
+```
+
+You can then construct and use these objects like you would any other Haxe class. However, unlike normal Haxe classes, these are passed by value instead of reference.
+
+```haxe
+function baz(o:Foo) {
+	o.bar = 10;
+}
+
+function main() {
+	final f = new Foo();
+
+	baz(f);
+
+	trace(f.bar); // prints 0, not 10
+}
+```
+
+> ##### Important: Value Semantics
+>
+> If you annotate an extern class with `@:cpp.ValueType` you must also annotate it with `@:semantics(value)`. Failure to do so will result in compiler error (CPP0001).
+
+#### Enums
+
+Extern enum abstracts with the `cpp.ValueType` metadata can be used to represent native enums.
+
+```c
+enum Colour {
+    Red,
+    Hreen,
+    blue
+};
+```
+
+```haxe
+@:semantics(value)
+@:cpp.ValueType
+extern enum abstract Colour(Int) {
+    var Red;
+    var Green;
+    var Blue;
+}
+```
+
+#### Flags
+
+##### StackOnly
+
+Value type externs can quite often be placed on the stack, avoiding GC allocations. But for some Haxe features, such as closures, they are required to be promoted to the GC heap to behave as expected. This may not be desirable and the stack only flag allows you to forbid this GC promotion, trying to use a stack only extern type in a way which requires it to be promoted to the heap will result in a compiler error (CPP0011).
+
+```haxe
+@:semantics(value)
+@:cpp.ValueType({ flags : [ StackOnly ] })
+extern class Foo {
+	var bar : Int;
+
+	function new():Void;
+}
+
+function main() {
+	final f = new Foo(); // CPP0011 - `f` is captured in closure `c` which requires it to be promoted to the heap, but it is marked as stack only.
+	final c = () -> {
+		f.bar = 10;
+	}
+
+	f();
+
+	trace(f.bar);
+}
+```
+
+#### Details
+
+##### Default Values and Constructors
+
+The copy constructor and copy assignment operators of the native type are used when creating values. If the externed type has these functions deleted then compilation will fail at the C++ stage. Standard class construction is used instead of regions of memory set to zero, so any default values or constructors on the extern class will be correctly assigned and invoked.
+
+```c++
+struct Point {
+	double x = 7;
+	double y = 27;
+};
+```
+
+```haxe
+@:semantics(value)
+@:cpp.ValueType
+extern class Point {
+	var x : Float;
+	var y : Float;
+
+	public function new():Void;
+}
+
+function main() {
+	final p = new Point();
+
+	trace(p.x, p.y);  // 7, 27
+}
+```
+
+##### Destructors
+
+The externed type will always have its destructor called if it's non-trivial. If the type lives on the stack, then it's through the usual C++ RAII mechanism. If a type with a non-trivial destructor is promoted to the heap, a finaliser is added to the promoted object to ensure the destructor is called. This does mean that the destructor is now called non-deterministically, since it relies on the GC collecting the object.
+
+##### Comparison
+
+The `==` and `!=` operators on the externed type are used for comparison between value types.
+
+##### Nullability
+
+Local variables which are value types are not nullable, declaration without initialisation results in a compiler error (CPP0005) and trying to assign a null value type to a local variable results in a runtime exception. Value type local variables are allowed to be null if they are explicitly wrapped in `Null<>`.
+
+Value types in class or interface fields as well as enums act like normal objects, i.e. they are nullable and are null by default unless instantiated in the constructor.
+
+##### Containers
+
+Value types stored in Haxe containers such as arrays, maps, vectors, and lists are individually boxed. They are not stored in contiguous memory and attempting to get a pointer to the underlying storage for this purpose is not valid.
+
+This is done to avoid all the complexities of copy constructors and in-place construction which would be needed to support the growing and shrinking of most Haxe containers.
+
+##### Templates
+
+Templated types can be represented by Haxe generic argument with some important limitations. Since C++ templates are compile time polymorphism and Haxe generic arguments are runtime polymorphism (with type erasure), the compiler must be able to resolve a generic argument to a concrete type. If it's unable to do this it will generate a compiler error (CPP0010).
+The resolved types must also not be GC objects, i.e. they cannot be Haxe strings, enums, or classes, only numeric types and other native marshalling types.
+
+```haxe
+@:semantics(value)
+@:cpp.ValueType
+extern class Foo {
+	static function print(v:T):Void;
+}
+
+function bar<T>(v:T) {
+	Foo.print(v);
+}
+
+@:generic function baz<T>(v:T) {
+	Foo.print(v);
+}
+
+function main() {
+	Foo.print(100); // Ok, can resolve T to Int.
+	Foo.print("test"); // CPP0003, resolved generic argument is an invalid type.
+	bar(100); // CPP0010, cannot resolve generic argument.
+	baz(100); // Ok, @:generic produces a specialisation for each parameter which allows the the parameter to be resolved.
+}
+```
+
+##### Pointer and Reference Conversion
+
+Value types automatically decay to pointers and references, meaning you do not need to deal with the pointer types in the `cpp` package to get addresses.
+
+```C++
+struct Foo {
+	static void bar(Foo* f);
+};
+```
+
+```haxe
+@:semantics(value)
+@:cpp.ValueType
+extern class Foo {
+	function new():Void;
+
+	static function bar(f:haxe.extern.AsVar<Foo>):Void;
+}
+
+function main() {
+	final f = new Foo();
+
+	Foo.bar(f); // Address of `f` is automatically passed in.
+}
+```
+
+##### Pointer Interop
+
+Despite not being needed in most situations, value types are compatible with the existing pointer types in the `cpp` package (`cpp.Pointer`, `cpp.RawPointer`, `cpp.Star`, and `cpp.Reference`) and can be used to explicitly represent pointers to value types.
+
+<!--label:target-cpp-ExternTypes-PointerTypes-->
+##### Pointer Types
+
+C and COM APIs require you to pass context objects into functions as C struct cannot contain functions, these contexts are simply pointers to a struct. In these APIs the user is not responsible for directly allocating the context (e.g. using `malloc`). Instead, the API provides some kind of alloc and free function to perform these acts for you. Due to the ubiquity of these APIs, pointer type extern classes were designed representing these patterns. They share many similarities to the value type extern but represent a type which is passed by reference (i.e. a pointer) instead of a type which is passed by value.
+
+```c
+struct ctx {};
+
+ctx* lib_alloc_ctx();
+void lib_free_ctx(ctx* pCtx);
+
+int lib_foo(ctx* pCtx);
+```
+
+```haxe
+@:semantics(value)
+@:cpp.PointerType({ type : "ctx" })
+extern class Ctx {}
+
+extern class Lib {
+	@:native("lib_alloc_ctx")
+	extern function allocCtx():Ctx;
+
+	@:native("lib_free_ctx")
+	extern function freeCtx(ctx:Ctx):Void;
+
+	@:native("lib_foo")
+	extern function foo(ctx:Ctx):Int;
+}
+
+function main() {
+	final ctx = Lib.allocCtx();
+	final val = Lib.foo(ctx);
+
+	trace(val);
+
+	Lib.freeCtx(ctx);
+}
+```
+
+There are not currently any flags available for pointer type externs.
+
+#### Details
+
+##### Constructors
+
+Since pointer types are designed to be allocated by library functions, they cannot have constructors or be manually constructed. Adding a constructor to a pointer type extern will generate a compiler error (CPP0004).
+
+```haxe
+@:semantics(value)
+@:cpp.PointerType
+extern class Ctx {
+	function new():Void; // CPP0004
+}
+```
+
+You are allowed to initialise a variable of a `cpp.PointerType` extern to null.
+
+```haxe
+@:semantics(value)
+@:cpp.PointerType
+extern class Ctx {}
+
+function main() {
+	final ctx : Ctx = null;
+}
+```
+
+##### Comparison
+
+Pointer types are compared by reference, i.e. the pointer addresses are compared, any comparison operators defined on the externed type are not used.
+
+##### Nullability
+
+Unlike value type externs, pointer type externs can be null.
+
+##### Pointer to Pointer
+
+Like value type externs, pointer type externs also require the value semantics metadata. This allows pointer type externs to easily support the pointer to pointer pattern for allocation and destruction.
+
+```c
+struct ctx {};
+
+void lib_alloc_ctx(ctx** pCtx);
+void lib_free_ctx(ctx** pCtx);
+```
+
+```haxe
+@:semantics(value)
+@:cpp.PointerType({ type : "ctx" })
+extern class Ctx {}
+
+extern class Lib {
+	@:native("lib_alloc_ctx")
+	extern function allocCtx(ctx:haxe.extern.AsVar<Ctx>):Void;
+
+	@:native("lib_free_ctx")
+	extern function freeCtx(ctx:haxe.extern.AsVar<Ctx>):Void;
+}
+
+function main() {
+	final source : Ctx = null;
+	final copy = source;
+
+	Lib.allocCtx(source);
+}
+```
+
+After the `Lib.allocCtx` call `source` will not be null as it will have the allocated `Ctx` placed in the pointer. However, `copy` will still be null due to value semantics still being used. Pointer types can also decay to `void**` which is often used in C and C++ apis.
+
+##### Pointer Interop
+
+Pointer type externs can also interop with the existing pointer types in the `cpp` package. It is important to note, however, that a pointer to a pointer type extern _is_ a double pointer. e.g. `cpp.RawPointer<Foo>` where `Foo` is a pointer type extern gets generated as `Foo**`, *not* `Foo*`.
+
+<!--label:target-cpp-ExternTypes-ManagedTypes-->
+##### Managed Types
+
+Historically, there has been no correct way to extern a custom `hx::Object` subclass. While you could use a standard extern class, GC read and write barriers are not generated for them which makes it unsound for various GC features. Managed type externs are finally a way to correctly bring custom `hx::Object` subclasses into Haxe.
+
+```C++
+class Foo : public hx::Object {};
+```
+
+```haxe
+@:cpp.ManagedType
+extern class Foo {
+	function new():Void;
+}
+
+function main() {
+	final f = new Foo();
+}
+```
+
+Managed type externs have very few restrictions and for the most part can be used like and act in the same way as normal Haxe classes.
+
+#### Flags
+
+##### StandardNaming
+
+For each Haxe class the compiler generates two C++ types, a `hx::ObjectPtr` subclass and a `hx::Object` subclass, with the `hx::Object` subclass name getting suffixed with `_obj`.
+
+```haxe
+class Foo {}
+```
+
+```C++
+class Foo : public hx::ObjectPtr {};
+
+class Foo_obj : public hx::Object {};
+```
+
+If your custom `hx::Object` subclass follows this naming scheme you can use the `StandardNaming` flag and the `_obj` suffix will be added for you.
+
+```c++
+class Foo_obj : public hx::Object {};
+```
+
+```haxe
+@:cpp.ManagedType({ flags : [ StandardNaming ] })
+extern class Foo {}
+```
+
+#### Details
+
+##### Inheritance
+
+Standard Haxe classes cannot inherit managed type externs. This is due to a difference in how super calls work in Haxe and C++, this restriction may be modified in the future.
+
+<!--label:target-cpp-Views-->
+#### Views
+
+The `cpp.marshal.View` type is a built-in stack-only value type extern which can be used to represent a contiguous region of memory, managed or unmanaged. It provides a convenient API for working with memory with zero GC allocations due to being a stack only type, all while guaranteeing safe access and performance near to raw pointer use.
+
+Convenience functions for creating views from standard Haxe types exist in the `cpp.marshal.ViewExtensions` class. E.g. you can create a span from a `haxe.ds.Vector`.
+
+```haxe
+import cpp.marshal.View;
+import haxe.ds.Vector;
+
+using cpp.marshal.ViewExtensions;
+using haxe.Int64;
+
+function main() {
+	final source = new Vector<Int>(10);
+    final view   = source.asView();
+
+    for (i in 0...view.length.toInt()) {
+        view[i] = i;
+    }
+
+    trace(source); // [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ]
+}
+```
+
+The same sample can also work over native memory with minimal changes.
+
+```haxe
+import cpp.marshal.View;
+
+using cpp.marshal.ViewExtensions;
+using haxe.Int64;
+
+function main() {
+    final source : cpp.Star<cpp.UInt8> = Native.malloc(10);
+    final view   = Pointer.fromStar(source).asView(10);
+
+    for (i in 0...view.length.toInt()) {
+        view[i] = i;
+    }
+
+    trace(view.toArray()); // [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ]
+}
+```
+
+#### Slices
+
+The two `slice` overloads return a new view pointing to a sub-region of the original view. These functions provide an ergonomic way of working with regions of memory without extra allocations or needing to manually managed indexes and lengths.
+
+```haxe
+import cpp.marshal.View;
+import haxe.ds.Vector;
+
+using cpp.marshal.ViewExtensions;
+using haxe.Int64;
+
+function main() {
+	final source = new Vector<Int>(10);
+    final view   = source.asView().slice(2, 5);
+
+    for (i in 0...view.length.toInt()) {
+        view[i] = 10 + i;
+    }
+
+    trace(source); // [ 0, 0, 10, 11, 12, 13, 14, 0, 0, 0 ]
+}
+```
+
+#### Reinterpret
+
+By reinterpreting a view you can treat the region of memory as another type, including value type externs. The following sample allocates bytes, reinterprets them as the `Point` value type extern, and writes random values to their `x` and `y` fields. Because `cpp.marhal.View` points to a region of memory all these writes occur on the original `haxe.io.Bytes` object.
+
+```haxe
+import cpp.marshal.View;
+import haxe.ds.Vector;
+
+using cpp.marshal.ViewExtensions;
+using haxe.Int64;
+
+function main() {
+	final source = new Vector<Int>(10);
+    final view   = source.asView().slice(2, 5);
+
+    for (i in 0...view.length.toInt()) {
+        view[i] = 10 + i;
+    }
+
+    trace(source); // [ 0, 0, 10, 11, 12, 13, 14, 0, 0, 0 ]
+}
+```
+
 <!--label:target-cppia-->
 ### Cppia
 
